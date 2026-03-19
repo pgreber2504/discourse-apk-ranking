@@ -1,5 +1,6 @@
 import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
+import { fn } from "@ember/helper";
 import { on } from "@ember/modifier";
 import { action } from "@ember/object";
 import { ajax } from "discourse/lib/ajax";
@@ -100,35 +101,37 @@ export default apiInitializer((api) => {
         return args.category?.slug === categorySlug;
       }
 
-      get activeTag() {
-        const router = api.container.lookup("service:router");
-        const url = router.currentURL || "";
-        for (const cat of APP_CATEGORIES) {
-          if (
-            url.includes(`/tags/c/${categorySlug}`) &&
-            url.includes(`app-${cat}`)
-          ) {
-            return cat;
-          }
-        }
-        return null;
-      }
-
-      get categoryId() {
-        return this.args.outletArgs?.category?.id;
-      }
+      @tracked activeCategory = null;
 
       get pills() {
         return APP_CATEGORIES.map((cat) => ({
           key: cat,
           label: i18n(`sideloaded_apps.categories.${cat}`),
-          tagUrl: `/tags/c/${categorySlug}/${this.categoryId}/app-${cat}`,
-          active: this.activeTag === cat,
+          active: this.activeCategory === cat,
         }));
       }
 
-      get allUrl() {
-        return `/c/${categorySlug}/${this.categoryId}`;
+      _updateBodyClass() {
+        document.body.classList.forEach((c) => {
+          if (c.startsWith("apk-filter--")) {
+            document.body.classList.remove(c);
+          }
+        });
+        if (this.activeCategory) {
+          document.body.classList.add(`apk-filter--${this.activeCategory}`);
+        }
+      }
+
+      @action
+      setCategory(cat) {
+        this.activeCategory = this.activeCategory === cat ? null : cat;
+        this._updateBodyClass();
+      }
+
+      @action
+      clearCategory() {
+        this.activeCategory = null;
+        this._updateBodyClass();
       }
 
       <template>
@@ -136,21 +139,23 @@ export default apiInitializer((api) => {
           <h3 class="sideloaded-category-filter__title">Sideloaded Apps
             Categories</h3>
           <div class="sideloaded-category-filter">
-            <a
-              href={{this.allUrl}}
+            <button
+              type="button"
               class="sideloaded-category-filter__pill
-                {{unless this.activeTag 'active'}}"
+                {{unless this.activeCategory 'active'}}"
+              {{on "click" this.clearCategory}}
             >
               {{i18n "sideloaded_apps.categories.all"}}
-            </a>
+            </button>
             {{#each this.pills as |pill|}}
-              <a
-                href={{pill.tagUrl}}
+              <button
+                type="button"
                 class="sideloaded-category-filter__pill
                   {{if pill.active 'active'}}"
+                {{on "click" (fn this.setCategory pill.key)}}
               >
                 {{pill.label}}
-              </a>
+              </button>
             {{/each}}
           </div>
         </div>
