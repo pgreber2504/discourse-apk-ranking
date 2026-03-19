@@ -231,7 +231,7 @@ $apk-categories:
 
 @each $cat in $apk-categories {
   body.apk-filter--#{$cat} {
-    .topic-list-item:not(.tag-app-#{$cat}):not(.pinned) {
+    .topic-list-item:not([data-apk-category="#{$cat}"]):not(.pinned) {
       display: none;
     }
   }

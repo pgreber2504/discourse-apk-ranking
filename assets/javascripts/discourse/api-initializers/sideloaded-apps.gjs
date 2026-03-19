@@ -103,7 +103,12 @@ export default apiInitializer((api) => {
 
       @tracked activeCategory = null;
 
-      get pills() {
+      willDestroy() {
+        super.willDestroy(...arguments);
+        this._clearBodyFilterClasses();
+      }
+
+get pills() {
         return APP_CATEGORIES.map((cat) => ({
           key: cat,
           label: i18n(`sideloaded_apps.categories.${cat}`),
@@ -111,27 +116,48 @@ export default apiInitializer((api) => {
         }));
       }
 
-      _updateBodyClass() {
+      
+
+      _clearBodyFilterClasses() {
         document.body.classList.forEach((c) => {
           if (c.startsWith("apk-filter--")) {
             document.body.classList.remove(c);
           }
         });
-        if (this.activeCategory) {
-          document.body.classList.add(`apk-filter--${this.activeCategory}`);
+      }
+
+      _tagTopicRows() {
+        const controller = api.container.lookup("controller:discovery/topics");
+        const topics = controller?.model?.topics;
+        if (!topics) {
+          return;
         }
+        topics.forEach((topic) => {
+          const cat = topic.apk_app_category;
+          if (!cat) {
+            return;
+          }
+          const row = document.querySelector(
+            `tr.topic-list-item[data-topic-id="${topic.id}"]`
+          );
+          row?.setAttribute("data-apk-category", cat);
+        });
       }
 
       @action
       setCategory(cat) {
         this.activeCategory = this.activeCategory === cat ? null : cat;
-        this._updateBodyClass();
+        this._clearBodyFilterClasses();
+        if (this.activeCategory) {
+          this._tagTopicRows();
+          document.body.classList.add(`apk-filter--${this.activeCategory}`);
+        }
       }
 
       @action
       clearCategory() {
         this.activeCategory = null;
-        this._updateBodyClass();
+        this._clearBodyFilterClasses();
       }
 
       <template>
