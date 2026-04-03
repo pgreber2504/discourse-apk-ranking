@@ -147,7 +147,7 @@ export default class ApkReviewDisplay extends Component {
   }
 
   get canRate() {
-    return this.args.currentUser && !this.isAuthor && !this.userRating;
+    return this.args.currentUser && !this.isAuthor;
   }
 
   get hasRated() {
@@ -209,7 +209,7 @@ export default class ApkReviewDisplay extends Component {
 
   @action
   async submitRating(value) {
-    if (this._ratingSubmitting || this.userRating) {
+    if (this._ratingSubmitting) {
       return;
     }
     this._ratingSubmitting = true;
@@ -477,6 +477,9 @@ export default class ApkReviewDisplay extends Component {
       );
 
       this._reviewOverride = result.review;
+      if (result.verification) {
+        this._verificationOverride = result.verification;
+      }
       this._editMode = false;
     } catch (e) {
       const msg =
@@ -747,22 +750,12 @@ export default class ApkReviewDisplay extends Component {
             {{#if this.canRate}}
               <div class="sideloaded-review-display__info-item">
                 <span class="sideloaded-review-display__label">{{i18n
-                    "sideloaded_apps.inline_rating.rate_this"
-                  }}</span>
-                <ApkStarRating
-                  @rating={{0}}
-                  @interactive={{true}}
-                  @onRate={{this.submitRating}}
-                />
-              </div>
-            {{else if this.hasRated}}
-              <div class="sideloaded-review-display__info-item">
-                <span class="sideloaded-review-display__label">{{i18n
                     "sideloaded_apps.inline_rating.your_rating"
                   }}</span>
                 <ApkStarRating
                   @rating={{this.userRating}}
-                  @interactive={{false}}
+                  @interactive={{true}}
+                  @onRate={{this.submitRating}}
                 />
               </div>
             {{/if}}
@@ -790,19 +783,6 @@ export default class ApkReviewDisplay extends Component {
             </div>
 
             <div class="sideloaded-review-display__download-meta">
-              <div class="sideloaded-review-display__download-meta-item">
-                <span
-                  class="sideloaded-review-display__download-meta-label"
-                >{{i18n "sideloaded_apps.last_access_date"}}</span>
-                <span class="sideloaded-review-display__download-meta-value">
-                  {{#if this.formattedLastAccess}}
-                    {{this.formattedLastAccess}}
-                  {{else}}
-                    {{i18n "sideloaded_apps.last_access_never"}}
-                  {{/if}}
-                </span>
-              </div>
-
               {{#if this.review.apk_checksum}}
                 <div class="sideloaded-review-display__download-meta-item">
                   <span

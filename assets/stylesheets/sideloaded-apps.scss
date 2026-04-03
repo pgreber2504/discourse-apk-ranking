@@ -177,6 +177,21 @@ body.sideloaded-apps-topic {
   }
 }
 
+// ── Hide Latest/Popular nav + category boxes on sideloaded apps page ──
+body.sideloaded-apps-category {
+  #navigation-bar.nav.nav-pills {
+    display: none !important;
+  }
+
+  .filter-category-boxes {
+    display: none !important;
+  }
+
+  .navigation-container {
+    justify-content: flex-end;
+  }
+}
+
 // ── Category Filter Pills ────────────────────────────
 .sideloaded-category-filter {
   display: flex;
@@ -855,11 +870,16 @@ body.sideloaded-composer-active {
   white-space: nowrap;
 }
 
+.sideloaded-rating-column {
+  white-space: nowrap;
+  text-align: center;
+  min-width: 80px;
+}
+
 .sideloaded-topic-rating {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  margin-left: 6px;
   font-size: 0.85em;
   vertical-align: middle;
 

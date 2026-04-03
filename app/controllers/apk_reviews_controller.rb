@@ -84,7 +84,16 @@ class ::ApkReviewsController < ::ApplicationController
 
     if review.update(review_params)
       create_edit_audit_post(review, old_attrs)
-      render json: { review: ApkReviewSerializer.new(review, root: false).as_json }
+
+      # When APK link changes, re-verify and update the verification record
+      verification_data = nil
+      if old_attrs["apk_link"] != review.apk_link
+        verification_data = refresh_verification_after_edit(review)
+      end
+
+      response = { review: ApkReviewSerializer.new(review.reload, root: false).as_json }
+      response[:verification] = verification_data if verification_data
+      render json: response
     else
       render json: { errors: review.errors.full_messages }, status: 422
     end
@@ -255,11 +264,6 @@ class ::ApkReviewsController < ::ApplicationController
 
     rating = params[:rating].to_i
     return render json: { error: "Rating must be between 1 and 5" }, status: 422 unless rating.between?(1, 5)
-
-    existing = ApkReview.user_rating_for(topic.id, current_user.id)
-    if existing
-      return render json: { error: "You have already rated this app", user_rating: existing }, status: 422
-    end
 
     PluginStore.set("sideloaded_ratings", "t#{topic.id}_u#{current_user.id}", rating)
 
@@ -442,6 +446,60 @@ class ::ApkReviewsController < ::ApplicationController
 
       response
     end
+  end
+
+  def refresh_verification_after_edit(review)
+    uri = URI.parse(review.apk_link)
+    response = probe_url(uri, open_timeout: 5, read_timeout: 5)
+    code = response.code.to_i
+
+    content_type = response["content-type"].to_s.downcase
+    is_html = content_type.include?("text/html")
+    is_download = response["content-disposition"].to_s.downcase.include?("attachment") ||
+      content_type.include?("application/") ||
+      content_type.include?("binary") ||
+      review.apk_link.match?(/\.apk\z/i)
+
+    verification = ApkVerification.find_or_initialize_by(topic_id: review.topic_id)
+    verification.link_type = (is_html && !is_download) ? "webpage" : "file"
+
+    if code.between?(200, 399)
+      verification.availability_status = "available"
+      verification.availability_description = "Link is accessible (HTTP #{code})"
+      review.update_column(:last_access_date, Time.current)
+    else
+      verification.availability_status = "unavailable"
+      verification.availability_description = "Link returned HTTP #{code}"
+    end
+    verification.last_http_status = code
+
+    if verification.availability_status == "available" && review.apk_checksum.present?
+      checksum_result = compute_checksum_for(review.apk_link, review.apk_checksum)
+      verification.consistency_status = checksum_result[:status]
+      verification.consistency_description = checksum_result[:description]
+      verification.last_computed_checksum = checksum_result[:checksum]
+    elsif review.apk_checksum.blank?
+      verification.consistency_status = "unknown"
+      verification.consistency_description = "No checksum available"
+    else
+      verification.consistency_status = "unknown"
+      verification.consistency_description = "Cannot verify — link is unavailable"
+    end
+
+    verification.last_checked_at = Time.current
+    verification.save!
+
+    {
+      availability_status: verification.availability_status,
+      consistency_status: verification.consistency_status,
+      last_checked_at: verification.last_checked_at,
+      availability_description: verification.availability_description,
+      consistency_description: verification.consistency_description,
+      link_type: verification.link_type,
+    }
+  rescue => e
+    Rails.logger.warn("[Sideloaded Apps] Verification after edit failed for topic #{review.topic_id}: #{e.message}")
+    nil
   end
 
   FIELD_LABELS = {

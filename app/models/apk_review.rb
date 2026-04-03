@@ -36,21 +36,32 @@ class ::ApkReview < ActiveRecord::Base
     APP_CATEGORIES
   end
 
-  # Community average: reply ratings + standalone ratings (excludes author)
+  # Community average: one rating per user (PluginStore is source of truth,
+  # PostCustomField is fallback for users who rated before PluginStore migration)
   def self.community_rating_for(topic_id)
-    reply_ratings =
-      PostCustomField
-        .joins(:post)
-        .where(name: "apk_rating")
-        .where(posts: { topic_id: topic_id, deleted_at: nil })
-        .where.not(posts: { post_number: 1 })
-        .pluck(:value)
-        .map(&:to_i)
-        .select { |r| r.between?(1, 5) }
+    ratings_by_user = {}
 
-    standalone_ratings = standalone_ratings_for(topic_id).values
+    # 1. Collect reply ratings keyed by user_id
+    PostCustomField
+      .joins(:post)
+      .where(name: "apk_rating")
+      .where(posts: { topic_id: topic_id, deleted_at: nil })
+      .where.not(posts: { post_number: 1 })
+      .pluck(Arel.sql("posts.user_id"), :value)
+      .each { |uid, val| ratings_by_user[uid] = val.to_i }
 
-    all_ratings = reply_ratings + standalone_ratings
+    # 2. PluginStore ratings override (source of truth)
+    PluginStoreRow
+      .where(plugin_name: "sideloaded_ratings")
+      .where("key LIKE ?", "t#{topic_id}_u%")
+      .pluck(:key, :value)
+      .each do |key, val|
+        uid = key.match(/\At\d+_u(\d+)\z/)&.captures&.first&.to_i
+        next unless uid
+        ratings_by_user[uid] = val.to_i
+      end
+
+    all_ratings = ratings_by_user.values.select { |r| r.between?(1, 5) }
     if all_ratings.any?
       { average: (all_ratings.sum.to_f / all_ratings.size).round(1), count: all_ratings.size }
     else

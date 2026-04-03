@@ -3,6 +3,7 @@ import { tracked } from "@glimmer/tracking";
 import { fn } from "@ember/helper";
 import { on } from "@ember/modifier";
 import { action } from "@ember/object";
+import SortableColumn from "discourse/components/topic-list/header/sortable-column";
 import { ajax } from "discourse/lib/ajax";
 import { apiInitializer } from "discourse/lib/api";
 import { i18n } from "discourse-i18n";
@@ -80,7 +81,6 @@ export default apiInitializer((api) => {
   // ── 2b. CATEGORY FILTER PILLS ───────────────────────
   const APP_CATEGORIES = [
     "communication",
-    "social",
     "productivity",
     "utilities",
     "health",
@@ -108,15 +108,13 @@ export default apiInitializer((api) => {
         this._clearBodyFilterClasses();
       }
 
-get pills() {
+      get pills() {
         return APP_CATEGORIES.map((cat) => ({
           key: cat,
           label: i18n(`sideloaded_apps.categories.${cat}`),
           active: this.activeCategory === cat,
         }));
       }
-
-      
 
       _clearBodyFilterClasses() {
         document.body.classList.forEach((c) => {
@@ -288,7 +286,7 @@ get pills() {
             <ApkComposerFields @model={{@outletArgs.model}} />
           {{/if}}
         {{else if this.isTopicAuthor}}
-          {{! Author already rated when creating the review — no stars in replies }}
+          {{! Author already rated when creating the review }}
         {{else}}
           <ReplyRatingField
             @model={{@outletArgs.model}}
@@ -374,13 +372,13 @@ get pills() {
         currentUser && topicUserId && currentUser.id === topicUserId;
 
       if (!isAuthor) {
-        const topicId = model?.topic?.id;
-        const existingRating =
-          (topicId && _userRatingsCache[topicId]) ||
-          model?.topic?.apk_user_rating;
-        if (!existingRating) {
-          const rating = model.metaData?.apk_rating;
-          if (!rating || rating < 1 || rating > 5) {
+        const rating = model.metaData?.apk_rating;
+        if (!rating || rating < 1 || rating > 5) {
+          const topicId = model?.topic?.id;
+          const existingRating =
+            (topicId && _userRatingsCache[topicId]) ||
+            model?.topic?.apk_user_rating;
+          if (!existingRating) {
             const dialog = api.container.lookup("service:dialog");
             dialog.alert(i18n("sideloaded_apps.reply_rating.validation_error"));
             return Promise.reject();
@@ -455,7 +453,39 @@ get pills() {
     }
   );
 
-  // ── 7. TOPIC LIST: Simplify columns ────────────────
+  // ── 7. TOPIC LIST: Add community rating column ────────────────
+  const CommunityRatingHeader = <template>
+    <SortableColumn
+      @sortable={{@sortable}}
+      @number="true"
+      @order="community_rating"
+      @activeOrder={{@activeOrder}}
+      @changeSort={{@changeSort}}
+      @ascending={{@ascending}}
+      @forceName={{i18n "sideloaded_apps.rating.community"}}
+    />
+  </template>;
+
+  const CommunityRatingItem = <template>
+    <td class="num sideloaded-rating-column topic-list-data">
+      {{#if @topic.apk_community_count}}
+        <span class="sideloaded-community-stars">
+          ★
+          {{formatRating @topic.apk_community_average}}
+        </span>
+        <span class="sideloaded-community-count">
+          ({{@topic.apk_community_count}})
+        </span>
+      {{else}}
+        <span class="sideloaded-no-rating">—</span>
+      {{/if}}
+    </td>
+  </template>;
+
+  function formatRating(value) {
+    return parseFloat(value).toFixed(1);
+  }
+
   api.registerValueTransformer("topic-list-columns", ({ value: columns }) => {
     const router = api.container.lookup("service:router");
     const currentURL = router.currentURL;
@@ -464,8 +494,14 @@ get pills() {
       return columns;
     }
 
-    columns.delete("views");
-    columns.delete("posters");
+    columns.add(
+      "community-rating",
+      {
+        header: CommunityRatingHeader,
+        item: CommunityRatingItem,
+      },
+      { after: "posters" }
+    );
 
     return columns;
   });
@@ -527,59 +563,6 @@ get pills() {
             />
           </a>
         {{/if}}
-      </template>
-    }
-  );
-
-  // ── 8b. TOPIC LIST: Rating (after title) ──────────
-  api.renderInOutlet(
-    "topic-list-after-title",
-    class SideloadedAppListRating extends Component {
-      static shouldRender(args) {
-        return !!args.topic?.apk_app_name;
-      }
-
-      get topic() {
-        return this.args.outletArgs?.topic;
-      }
-
-      get communityAvg() {
-        const avg = this.topic?.apk_community_average;
-        if (avg && avg > 0) {
-          return Number(avg).toFixed(1);
-        }
-        return null;
-      }
-
-      get communityCount() {
-        return this.topic?.apk_community_count || 0;
-      }
-
-      get hasRatings() {
-        return this.communityCount > 0;
-      }
-
-      <template>
-        <span
-          class="sideloaded-topic-rating
-            {{if this.hasRatings 'has-ratings' 'no-ratings'}}"
-          title={{i18n "sideloaded_apps.rating.community"}}
-        >
-          {{#if this.hasRatings}}
-            <span class="sideloaded-topic-rating__stars">★</span>
-            <span
-              class="sideloaded-topic-rating__value"
-            >{{this.communityAvg}}</span>
-            <span
-              class="sideloaded-topic-rating__count"
-            >({{this.communityCount}})</span>
-          {{else}}
-            <span class="sideloaded-topic-rating__stars">☆</span>
-            <span class="sideloaded-topic-rating__value">{{i18n
-                "sideloaded_apps.rating.no_ratings"
-              }}</span>
-          {{/if}}
-        </span>
       </template>
     }
   );
@@ -770,6 +753,9 @@ class ReplyRatingField extends Component {
   }
 
   get displayRating() {
+    if (this._justRated) {
+      return this.rating;
+    }
     if (this.args.existingRating) {
       return this.args.existingRating;
     }
@@ -778,9 +764,6 @@ class ReplyRatingField extends Component {
 
   @action
   setRating(value) {
-    if (this.args.existingRating || this._justRated) {
-      return;
-    }
     this.rating = value;
     this._justRated = true;
     const model = this.args.model;
@@ -799,23 +782,19 @@ class ReplyRatingField extends Component {
 
   <template>
     <div class="sideloaded-reply-rating">
+      <label class="sideloaded-reply-rating__label">
+        {{i18n "sideloaded_apps.reply_rating.title"}}
+      </label>
+      <ApkStarRating
+        @rating={{this.displayRating}}
+        @interactive={{true}}
+        @onRate={{this.setRating}}
+      />
       {{#if this.hasExistingRating}}
-        <label class="sideloaded-reply-rating__label">
-          {{i18n "sideloaded_apps.reply_rating.your_rating"}}
-        </label>
-        <ApkStarRating @rating={{this.displayRating}} @interactive={{false}} />
         <span class="sideloaded-reply-rating__help">
-          {{i18n "sideloaded_apps.reply_rating.already_rated"}}
+          {{i18n "sideloaded_apps.reply_rating.change_rating"}}
         </span>
       {{else}}
-        <label class="sideloaded-reply-rating__label">
-          {{i18n "sideloaded_apps.reply_rating.title"}}
-        </label>
-        <ApkStarRating
-          @rating={{this.displayRating}}
-          @interactive={{true}}
-          @onRate={{this.setRating}}
-        />
         <span class="sideloaded-reply-rating__help">
           {{i18n "sideloaded_apps.reply_rating.help"}}
         </span>

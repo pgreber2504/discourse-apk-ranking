@@ -350,7 +350,6 @@ export default class ApkComposerFields extends Component {
         value: "communication",
         label: i18n("sideloaded_apps.categories.communication"),
       },
-      { value: "social", label: i18n("sideloaded_apps.categories.social") },
       {
         value: "productivity",
         label: i18n("sideloaded_apps.categories.productivity"),

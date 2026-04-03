@@ -150,27 +150,38 @@ after_initialize do
     topic_ids = apk_topics.map(&:id)
     reviews = ApkReview.where(topic_id: topic_ids).index_by(&:topic_id)
 
-    # Community ratings from replies (excludes first post / author rating)
-    reply_ratings_by_topic =
-      PostCustomField
-        .joins(:post)
-        .where(name: "apk_rating")
-        .where(posts: { topic_id: topic_ids, deleted_at: nil })
-        .where.not(posts: { post_number: 1 })
-        .group("posts.topic_id")
-        .pluck(Arel.sql("posts.topic_id, AVG(post_custom_fields.value::integer), COUNT(post_custom_fields.id)"))
-        .each_with_object({}) { |(tid, avg, cnt), h| h[tid] = { average: avg.to_f.round(1), count: cnt.to_i } }
+    # Community ratings: one per user (PluginStore overrides PostCustomField)
+    # 1. Reply ratings keyed by (topic_id, user_id)
+    reply_ratings_by_topic_user = {}
+    PostCustomField
+      .joins(:post)
+      .where(name: "apk_rating")
+      .where(posts: { topic_id: topic_ids, deleted_at: nil })
+      .where.not(posts: { post_number: 1 })
+      .pluck(Arel.sql("posts.topic_id, posts.user_id, post_custom_fields.value"))
+      .each do |tid, uid, val|
+        reply_ratings_by_topic_user[[tid, uid]] = val.to_i
+      end
 
-    # Standalone ratings from PluginStore
-    standalone_by_topic = {}
+    # 2. PluginStore ratings override per user
     key_patterns = topic_ids.map { |tid| "t#{tid}_u%" }
-    PluginStoreRow.where(plugin_name: "sideloaded_ratings").where(
-      key_patterns.map { "key LIKE ?" }.join(" OR "),
-      *key_patterns,
-    ).pluck(:key, :value).each do |key, val|
-      tid = key.match(/\At(\d+)_u/)&.captures&.first&.to_i
-      next unless tid
-      (standalone_by_topic[tid] ||= []) << val.to_i
+    if key_patterns.any?
+      PluginStoreRow.where(plugin_name: "sideloaded_ratings").where(
+        key_patterns.map { "key LIKE ?" }.join(" OR "),
+        *key_patterns,
+      ).pluck(:key, :value).each do |key, val|
+        match = key.match(/\At(\d+)_u(\d+)\z/)
+        next unless match
+        tid = match[1].to_i
+        uid = match[2].to_i
+        reply_ratings_by_topic_user[[tid, uid]] = val.to_i
+      end
+    end
+
+    # Group by topic
+    ratings_by_topic = {}
+    reply_ratings_by_topic_user.each do |(tid, _uid), rating|
+      (ratings_by_topic[tid] ||= []) << rating
     end
 
     apk_topics.each do |topic|
@@ -186,16 +197,11 @@ after_initialize do
         end,
       )
 
-      reply_data = reply_ratings_by_topic[topic.id]
-      standalone = (standalone_by_topic[topic.id] || []).select { |r| r.between?(1, 5) }
+      all_ratings = (ratings_by_topic[topic.id] || []).select { |r| r.between?(1, 5) }
 
-      reply_sum = reply_data ? reply_data[:average] * reply_data[:count] : 0.0
-      reply_count = reply_data ? reply_data[:count] : 0
-      total_count = reply_count + standalone.size
-
-      if total_count > 0
-        combined_avg = ((reply_sum + standalone.sum) / total_count).round(1)
-        topic.preload_apk_community_rating({ average: combined_avg, count: total_count })
+      if all_ratings.any?
+        avg = (all_ratings.sum.to_f / all_ratings.size).round(1)
+        topic.preload_apk_community_rating({ average: avg, count: all_ratings.size })
       else
         topic.preload_apk_community_rating({ average: 0.0, count: 0 })
       end
@@ -288,12 +294,24 @@ after_initialize do
     url.present? ? url : nil
   end
 
+  # ── Exclude sideloaded apps from homepage topic list ─
+  TopicQuery.add_custom_filter(:exclude_sideloaded_from_homepage) do |results, topic_query|
+    if topic_query.options[:category_id].blank? && topic_query.options[:no_subcategories].nil?
+      slug = SiteSetting.sideloaded_apps_category_slug
+      apk_category = Category.find_by(slug: slug)
+      results = results.where.not(category_id: apk_category.id) if apk_category
+    end
+    results
+  end
+
   # ── Topic list ordering by community rating ─────────
   register_modifier(:topic_query_apply_ordering_result) do |result, sort_column, sort_dir, options, topic_query|
     category_id = topic_query.options[:category_id]
     category_slug = category_id ? Category.where(id: category_id).pick(:slug) : nil
 
-    if category_slug == SiteSetting.sideloaded_apps_category_slug
+    if category_slug == SiteSetting.sideloaded_apps_category_slug &&
+         (sort_column.blank? || sort_column == "default" || sort_column == "community_rating")
+      direction = sort_dir == "ASC" ? "ASC" : "DESC"
       result
         .joins(
           "LEFT JOIN (
@@ -319,7 +337,7 @@ after_initialize do
         .order(
           Arel.sql(
             "CASE WHEN topics.pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC, " \
-            "COALESCE(community_ratings.community_avg, 0) DESC",
+            "COALESCE(community_ratings.community_avg, 0) #{direction}",
           ),
         )
     else
@@ -548,14 +566,11 @@ after_initialize do
     rating = rating_raw.to_i if rating_raw.present?
 
     if !is_topic_author && rating&.between?(1, 5)
-      existing = ApkReview.user_rating_for(post.topic_id, user.id)
-      if existing
-        Rails.logger.info("[Sideloaded Apps] User #{user.id} already rated topic #{post.topic_id} with #{existing}, skipping")
-      else
-        post.custom_fields["apk_rating"] = rating
-        post.save_custom_fields
-        Rails.logger.info("[Sideloaded Apps] Saved rating #{rating} for user #{user.id} on post #{post.id} in topic #{post.topic_id}")
-      end
+      # Update standalone rating (PluginStore) — always overwrite
+      PluginStore.set("sideloaded_ratings", "t#{post.topic_id}_u#{user.id}", rating)
+      post.custom_fields["apk_rating"] = rating
+      post.save_custom_fields
+      Rails.logger.info("[Sideloaded Apps] Saved/updated rating #{rating} for user #{user.id} on post #{post.id} in topic #{post.topic_id}")
     end
 
     # Auto-prefix with version (skip for audit posts from review edits)
@@ -564,7 +579,18 @@ after_initialize do
     review = ApkReview.find_by(topic_id: post.topic_id)
     next unless review
 
-    prefix = "> #{I18n.t("js.sideloaded_apps.reply_version_prefix")} #{review.apk_version}\n\n"
+    # Use rating from this reply, or fall back to user's existing rating
+    effective_rating = rating || (!is_topic_author ? ApkReview.user_rating_for(post.topic_id, user.id) : nil)
+
+    prefix = "> #{I18n.t("js.sideloaded_apps.reply_version_prefix")} #{review.apk_version}"
+    if is_topic_author
+      author_stars = "\u2605" * review.author_rating + "\u2606" * (5 - review.author_rating)
+      prefix += "\n> #{I18n.t("js.sideloaded_apps.reply_author_rating_prefix")} #{author_stars} · #{I18n.t("js.sideloaded_apps.reply_author_badge")}"
+    elsif effective_rating&.between?(1, 5)
+      stars = "\u2605" * effective_rating + "\u2606" * (5 - effective_rating)
+      prefix += "\n> #{I18n.t("js.sideloaded_apps.reply_user_rating_prefix")} #{stars}"
+    end
+    prefix += "\n\n"
     unless post.raw.include?("Review for version") || post.raw.include?(I18n.t("js.sideloaded_apps.reply_version_prefix"))
       post.update_column(:raw, "#{prefix}#{post.raw}")
       post.rebake!
