@@ -1,13 +1,13 @@
 en:
   js:
     sideloaded_apps:
-      title: "Kompakt Community Apps Ranking"
+      title: "Kompakt Community App Ranking"
       subtitle: "Community-rated apps for Mudita Kompakt"
       nav_label: "Community Apps"
       new_review: "New Review"
 
       banner:
-        title: "Kompakt Community Apps Ranking"
+        title: "Kompakt Community App Ranking"
         title_line1: "Kompakt Community"
         title_line2: "Apps Ranking"
         text: "Discover community-rated apps for your Kompakt. Share your experience and rate the best sideloaded apps!"
