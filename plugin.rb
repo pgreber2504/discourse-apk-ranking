@@ -58,6 +58,7 @@ after_initialize do
 
   # Ensure topic_opts (containing custom_fields) survives the approval queue
   NewPostManager.add_plugin_payload_attribute(:topic_opts)
+  require_relative "lib/link_probe"
   require_relative "app/models/apk_review"
   require_relative "app/models/apk_verification"
   require_relative "app/controllers/apk_reviews_controller"
@@ -477,40 +478,8 @@ after_initialize do
     DiscourseTagging.tag_topic_by_names(topic, Guardian.new(Discourse.system_user), [tag_name], append: true)
 
     if apk_link.present?
-      probe_result = begin
-        uri = URI.parse(apk_link)
-        FinalDestination::HTTP.start(
-          uri.host, uri.port,
-          use_ssl: uri.scheme == "https",
-          open_timeout: 5, read_timeout: 5,
-        ) do |http|
-          head = Net::HTTP::Head.new(uri.request_uri)
-          head["User-Agent"] = "Mozilla/5.0 (compatible; DiscourseBot/1.0)"
-          head["Accept"] = "*/*"
-          resp = http.request(head)
-
-          if resp.code.to_i.in?([403, 405, 501])
-            get = Net::HTTP::Get.new(uri.request_uri)
-            get["User-Agent"] = "Mozilla/5.0 (compatible; DiscourseBot/1.0)"
-            get["Accept"] = "*/*"
-            get["Range"] = "bytes=0-0"
-            resp = http.request(get)
-          end
-
-          content_type = resp["content-type"].to_s.downcase
-          is_html = content_type.include?("text/html")
-          is_download = resp["content-disposition"].to_s.downcase.include?("attachment") ||
-            content_type.include?("application/") ||
-            content_type.include?("binary") ||
-            apk_link.match?(/\.apk\z/i)
-
-          { available: resp.code.to_i.between?(200, 399), link_type: (is_html && !is_download) ? "webpage" : "file" }
-        end
-      rescue StandardError
-        { available: false, link_type: nil }
-      end
-
-      link_available = probe_result[:available]
+      probe = ::DiscourseApkRanking::LinkProbe.probe(apk_link, open_timeout: 5, read_timeout: 5)
+      link_available = probe.error.nil? && probe.code&.between?(200, 299)
 
       ApkVerification.create!(
         topic_id: topic.id,
@@ -520,7 +489,7 @@ after_initialize do
         consistency_description:
           apk_checksum.present? ? "Checksum computed at submission" : "No checksum available",
         last_computed_checksum: apk_checksum,
-        link_type: probe_result[:link_type],
+        link_type: probe.link_type,
         last_checked_at: Time.current,
       )
     end
@@ -589,40 +558,8 @@ after_initialize do
     DiscourseTagging.tag_topic_by_names(topic, Guardian.new(Discourse.system_user), [tag_name], append: true)
 
     if apk_link.present?
-      probe_result = begin
-        uri = URI.parse(apk_link)
-        FinalDestination::HTTP.start(
-          uri.host, uri.port,
-          use_ssl: uri.scheme == "https",
-          open_timeout: 5, read_timeout: 5,
-        ) do |http|
-          head = Net::HTTP::Head.new(uri.request_uri)
-          head["User-Agent"] = "Mozilla/5.0 (compatible; DiscourseBot/1.0)"
-          head["Accept"] = "*/*"
-          resp = http.request(head)
-
-          if resp.code.to_i.in?([403, 405, 501])
-            get = Net::HTTP::Get.new(uri.request_uri)
-            get["User-Agent"] = "Mozilla/5.0 (compatible; DiscourseBot/1.0)"
-            get["Accept"] = "*/*"
-            get["Range"] = "bytes=0-0"
-            resp = http.request(get)
-          end
-
-          content_type = resp["content-type"].to_s.downcase
-          is_html = content_type.include?("text/html")
-          is_download = resp["content-disposition"].to_s.downcase.include?("attachment") ||
-            content_type.include?("application/") ||
-            content_type.include?("binary") ||
-            apk_link.match?(/\.apk\z/i)
-
-          { available: resp.code.to_i.between?(200, 399), link_type: (is_html && !is_download) ? "webpage" : "file" }
-        end
-      rescue StandardError
-        { available: false, link_type: nil }
-      end
-
-      link_available = probe_result[:available]
+      probe = ::DiscourseApkRanking::LinkProbe.probe(apk_link, open_timeout: 5, read_timeout: 5)
+      link_available = probe.error.nil? && probe.code&.between?(200, 299)
 
       ApkVerification.create!(
         topic_id: topic.id,
@@ -632,7 +569,7 @@ after_initialize do
         consistency_description:
           apk_checksum.present? ? "Checksum computed at submission" : "No checksum available",
         last_computed_checksum: apk_checksum,
-        link_type: probe_result[:link_type],
+        link_type: probe.link_type,
         last_checked_at: Time.current,
       )
     end

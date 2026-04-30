@@ -5,8 +5,6 @@ require "digest"
 class ::ApkReviewsController < ::ApplicationController
   requires_plugin "discourse-apk-ranking"
 
-  LINK_CHECK_UA = "Mozilla/5.0 (compatible; DiscourseBot/1.0; +https://discourse.org)"
-
   before_action :ensure_logged_in, except: %i[index show]
 
   def index
@@ -108,7 +106,7 @@ class ::ApkReviewsController < ::ApplicationController
     uri = URI.parse(review.apk_link)
     response = probe_url(uri, open_timeout: 5, read_timeout: 5)
 
-    if response.code.to_i.between?(200, 399)
+    if response.code.to_i.between?(200, 299)
       review.update_column(:last_access_date, Time.current)
       render json: {
         success: true,
@@ -148,7 +146,7 @@ class ::ApkReviewsController < ::ApplicationController
       content_disposition.include?("attachment") || content_type.include?("application/") ||
         content_type.include?("binary") || url.match?(/\.apk\z/i)
 
-    if !response.code.to_i.between?(200, 399)
+    if !response.code.to_i.between?(200, 299)
       render json: {
                valid: false,
                is_direct_download: false,
@@ -185,67 +183,37 @@ class ::ApkReviewsController < ::ApplicationController
     end
 
     sha256 = Digest::SHA256.new
-    total_bytes = 0
-    valid_download = false
-
-    FinalDestination::HTTP.start(
-      uri.host,
-      uri.port,
-      use_ssl: uri.scheme == "https",
-      open_timeout: 10,
-      read_timeout: DOWNLOAD_TIMEOUT,
-    ) do |http|
-      request = Net::HTTP::Get.new(uri.request_uri)
-      request["User-Agent"] = LINK_CHECK_UA
-      request["Accept"] = "*/*"
-      http.request(request) do |response|
-        unless response.code.to_i.between?(200, 299)
-          return(
-            render json: {
-                     valid_download: false,
-                     reason: I18n.t("js.sideloaded_apps.link_validation.http_error", code: response.code),
-                   }
-          )
-        end
-
-        content_type = response["content-type"].to_s.downcase
-        if content_type.include?("text/html")
-          return(
-            render json: {
-                     valid_download: false,
-                     reason: I18n.t("js.sideloaded_apps.link_validation.not_a_download"),
-                   }
-          )
-        end
-
-        valid_download = true
-
-        response.read_body do |chunk|
-          total_bytes += chunk.bytesize
-          if total_bytes > MAX_DOWNLOAD_SIZE
-            return(
-              render json: {
-                       valid_download: false,
-                       reason: I18n.t("js.sideloaded_apps.link_validation.file_too_large", max_mb: MAX_DOWNLOAD_SIZE / 1.megabyte),
-                     }
-            )
-          end
-          sha256.update(chunk)
-        end
+    result =
+      ::DiscourseApkRanking::LinkProbe.stream_download(
+        url, max_size: MAX_DOWNLOAD_SIZE, read_timeout: DOWNLOAD_TIMEOUT,
+      ) do |chunk|
+        sha256.update(chunk)
       end
+
+    if result.error
+      return render json: { valid_download: false, reason: I18n.t("js.sideloaded_apps.link_validation.unreachable", message: result.error) }
+    end
+
+    unless result.code&.between?(200, 299)
+      return render json: { valid_download: false, reason: I18n.t("js.sideloaded_apps.link_validation.http_error", code: result.code) }
+    end
+
+    if result.content_type.to_s.include?("text/html")
+      return render json: { valid_download: false, reason: I18n.t("js.sideloaded_apps.link_validation.not_a_download") }
+    end
+
+    if result.truncated
+      return render json: { valid_download: false, reason: I18n.t("js.sideloaded_apps.link_validation.file_too_large", max_mb: MAX_DOWNLOAD_SIZE / 1.megabyte) }
     end
 
     computed = sha256.hexdigest
     user_checksum = params[:user_checksum].to_s.strip.downcase
-    user_checksum_match =
-      if user_checksum.present?
-        computed == user_checksum
-      end
+    user_checksum_match = computed == user_checksum if user_checksum.present?
 
     render json: {
-             valid_download: valid_download,
+             valid_download: true,
              checksum: computed,
-             file_size: total_bytes,
+             file_size: result.bytes_read,
              user_checksum_match: user_checksum_match,
            }
   rescue URI::InvalidURIError
@@ -296,7 +264,7 @@ class ::ApkReviewsController < ::ApplicationController
     verification = ApkVerification.find_or_initialize_by(topic_id: review.topic_id)
     verification.link_type = (is_html && !is_download) ? "webpage" : "file"
 
-    if code.between?(200, 399)
+    if code.between?(200, 299)
       verification.availability_status = "available"
       verification.availability_description = "Link is accessible (HTTP #{code})"
       review.update_column(:last_access_date, Time.current)
@@ -390,32 +358,24 @@ class ::ApkReviewsController < ::ApplicationController
   private
 
   def compute_checksum_for(url, original_checksum)
-    uri = URI.parse(url)
     sha256 = Digest::SHA256.new
     max_size = SiteSetting.sideloaded_apps_max_apk_file_size_mb.megabytes
 
-    FinalDestination::HTTP.start(
-      uri.host, uri.port,
-      use_ssl: uri.scheme == "https",
-      open_timeout: 10,
-      read_timeout: 60,
-    ) do |http|
-      request = Net::HTTP::Get.new(uri.request_uri)
-      request["User-Agent"] = LINK_CHECK_UA
-      request["Accept"] = "*/*"
-      total_bytes = 0
-
-      http.request(request) do |response|
-        unless response.code.to_i.between?(200, 299)
-          return { status: "inconsistent", description: "Could not download file (HTTP #{response.code})", checksum: nil }
-        end
-
-        response.read_body do |chunk|
-          total_bytes += chunk.bytesize
-          return { status: "inconsistent", description: "File exceeds maximum size limit", checksum: nil } if total_bytes > max_size
-          sha256.update(chunk)
-        end
+    result =
+      ::DiscourseApkRanking::LinkProbe.stream_download(url, max_size: max_size) do |chunk|
+        sha256.update(chunk)
       end
+
+    if result.error
+      return { status: "inconsistent", description: "Verification error: #{result.error}", checksum: nil }
+    end
+
+    unless result.code&.between?(200, 299)
+      return { status: "inconsistent", description: "Could not download file (HTTP #{result.code})", checksum: nil }
+    end
+
+    if result.truncated
+      return { status: "inconsistent", description: "File exceeds maximum size limit", checksum: nil }
     end
 
     computed = sha256.hexdigest
@@ -428,28 +388,36 @@ class ::ApkReviewsController < ::ApplicationController
     { status: "inconsistent", description: "Verification error: #{e.message}", checksum: nil }
   end
 
+  # Backward-compatible facade over LinkProbe so callers can keep
+  # passing a URI and reading `.code` / `[header]` off the result.
+  # Follows redirects (essential for GitHub release downloads etc.).
   def probe_url(uri, open_timeout: 10, read_timeout: 10)
-    FinalDestination::HTTP.start(
-      uri.host,
-      uri.port,
-      use_ssl: uri.scheme == "https",
-      open_timeout: open_timeout,
-      read_timeout: read_timeout,
-    ) do |http|
-      head = Net::HTTP::Head.new(uri.request_uri)
-      head["User-Agent"] = LINK_CHECK_UA
-      head["Accept"] = "*/*"
-      response = http.request(head)
+    result =
+      ::DiscourseApkRanking::LinkProbe.probe(
+        uri.to_s, open_timeout: open_timeout, read_timeout: read_timeout,
+      )
+    raise StandardError, result.error if result.error
+    ProbeResponseShim.new(result)
+  end
 
-      if response.code.to_i.in?([403, 405, 501])
-        get = Net::HTTP::Get.new(uri.request_uri)
-        get["User-Agent"] = LINK_CHECK_UA
-        get["Accept"] = "*/*"
-        get["Range"] = "bytes=0-0"
-        response = http.request(get)
+  # Wraps a LinkProbe::ProbeResult to mimic the subset of the
+  # Net::HTTPResponse API that pre-existing call sites use.
+  class ProbeResponseShim
+    def initialize(result)
+      @result = result
+    end
+
+    def code
+      @result.code.to_s
+    end
+
+    def [](header)
+      case header.to_s.downcase
+      when "content-type" then @result.content_type
+      when "content-disposition" then @result.content_disposition
+      when "content-length" then @result.content_length.to_s
+      when "location" then @result.final_url
       end
-
-      response
     end
   end
 
@@ -468,7 +436,7 @@ class ::ApkReviewsController < ::ApplicationController
     verification = ApkVerification.find_or_initialize_by(topic_id: review.topic_id)
     verification.link_type = (is_html && !is_download) ? "webpage" : "file"
 
-    if code.between?(200, 399)
+    if code.between?(200, 299)
       verification.availability_status = "available"
       verification.availability_description = "Link is accessible (HTTP #{code})"
       review.update_column(:last_access_date, Time.current)
