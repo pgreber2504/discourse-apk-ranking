@@ -11,6 +11,7 @@ import { ajax } from "discourse/lib/ajax";
 import UppyUpload from "discourse/lib/uppy/uppy-upload";
 import { eq } from "discourse/truth-helpers";
 import { i18n } from "discourse-i18n";
+import { validateIconUrl } from "../lib/validate-icon-url";
 import ApkStarRating from "./apk-star-rating";
 import ApkVerificationStatus from "./apk-verification-status";
 import ReportOutdatedModal from "./modal/report-outdated";
@@ -53,6 +54,11 @@ export default class ApkReviewDisplay extends Component {
   @tracked _editLinkValidationStatus = null;
   @tracked _editLinkValidationMessage = "";
   @tracked _editLinkIsDirectDownload = null;
+  @tracked _editIconUrl = "";
+  @tracked _editIconValidationStatus = null;
+  @tracked _editIconValidationMessage = "";
+  @tracked _editIconPreviewUrl = null;
+  _editIconValidationToken = 0;
   _touchedFields = new Set();
   @tracked _reviewOverride = null;
   @tracked _verificationOverride = null;
@@ -60,6 +66,7 @@ export default class ApkReviewDisplay extends Component {
 
   _editValidateTimer = null;
   _editLinkDebounceTimer = null;
+  _editIconDebounceTimer = null;
 
   constructor() {
     super(...arguments);
@@ -77,6 +84,10 @@ export default class ApkReviewDisplay extends Component {
     if (this._editLinkDebounceTimer) {
       cancel(this._editLinkDebounceTimer);
     }
+    if (this._editIconDebounceTimer) {
+      cancel(this._editIconDebounceTimer);
+    }
+    this._editIconValidationToken++;
     this.appEvents.off("composer:created-post", this, "_onComposerCreatedPost");
   }
 
@@ -279,6 +290,10 @@ export default class ApkReviewDisplay extends Component {
       url,
       original_filename: url.split("/").pop(),
     }));
+    this._editIconUrl = this.review.icon_url || "";
+    this._editIconValidationStatus = null;
+    this._editIconValidationMessage = "";
+    this._editIconPreviewUrl = null;
     this._editFieldErrors = {};
     this._touchedFields = new Set();
     this._editLinkValidationStatus = null;
@@ -287,6 +302,10 @@ export default class ApkReviewDisplay extends Component {
     this._editLinkIsDirectDownload =
       linkType === "file" ? true : linkType === "webpage" ? false : null;
     this._editMode = true;
+
+    if (this._editIconUrl.trim()) {
+      this._validateEditIcon();
+    }
   }
 
   @action
@@ -295,6 +314,10 @@ export default class ApkReviewDisplay extends Component {
     this._touchedFields = new Set();
     this._editLinkValidationStatus = null;
     this._editLinkValidationMessage = "";
+    this._editIconValidationStatus = null;
+    this._editIconValidationMessage = "";
+    this._editIconPreviewUrl = null;
+    this._editIconValidationToken++;
     this._editMode = false;
   }
 
@@ -392,7 +415,8 @@ export default class ApkReviewDisplay extends Component {
   get _hasEditErrors() {
     return (
       Object.values(this._editFieldErrors).some(Boolean) ||
-      this._editLinkValidationStatus === "invalid"
+      this._editLinkValidationStatus === "invalid" ||
+      (this._editIconUrl?.trim() && this._editIconValidationStatus === "invalid")
     );
   }
 
@@ -447,6 +471,39 @@ export default class ApkReviewDisplay extends Component {
       });
   }
 
+  _validateEditIcon() {
+    const url = this._editIconUrl.trim();
+    const token = ++this._editIconValidationToken;
+
+    this._editIconValidationStatus = "checking";
+    this._editIconValidationMessage = "";
+
+    validateIconUrl(url).then((result) => {
+      if (token !== this._editIconValidationToken) {
+        return;
+      }
+      if (result === "empty") {
+        this._editIconValidationStatus = null;
+        this._editIconValidationMessage = "";
+        this._editIconPreviewUrl = null;
+      } else if (result === "valid") {
+        this._editIconValidationStatus = "valid";
+        this._editIconValidationMessage = i18n(
+          "sideloaded_apps.icon_validation.valid"
+        );
+        this._editIconPreviewUrl = url;
+      } else {
+        this._editIconValidationStatus = "invalid";
+        this._editIconValidationMessage = i18n(
+          `sideloaded_apps.icon_validation.${
+            result === "invalid_url" ? "invalid_url" : "invalid"
+          }`
+        );
+        this._editIconPreviewUrl = null;
+      }
+    });
+  }
+
   get isEditChecksumDisabled() {
     return this._editLinkIsDirectDownload === false;
   }
@@ -469,6 +526,12 @@ export default class ApkReviewDisplay extends Component {
         cancel(this._editLinkDebounceTimer);
       }
       this._editLinkDebounceTimer = debounce(this, this._validateEditLink, 800);
+    }
+    if (field === "_editIconUrl") {
+      if (this._editIconDebounceTimer) {
+        cancel(this._editIconDebounceTimer);
+      }
+      this._editIconDebounceTimer = debounce(this, this._validateEditIcon, 600);
     }
   }
 
@@ -515,6 +578,19 @@ export default class ApkReviewDisplay extends Component {
       return;
     }
 
+    if (
+      this._editIconUrl?.trim() &&
+      this._editIconValidationStatus === "checking"
+    ) {
+      const dialog =
+        window.__container__?.lookup("service:dialog") ||
+        window.Discourse?.__container__?.lookup("service:dialog");
+      if (dialog) {
+        dialog.alert(i18n("sideloaded_apps.icon_validation.still_checking"));
+      }
+      return;
+    }
+
     this._saving = true;
 
     try {
@@ -528,6 +604,7 @@ export default class ApkReviewDisplay extends Component {
           ? ""
           : this._editChecksum.trim(),
         screenshot_urls: this._editScreenshots.map((s) => s.url),
+        icon_url: this._editIconUrl.trim(),
       };
 
       const newLink = this._editLink.trim();
@@ -742,6 +819,50 @@ export default class ApkReviewDisplay extends Component {
                   class="sideloaded-form__error"
                 >{{this._editFieldErrors._editRating}}</span>
               {{/if}}
+            </div>
+
+            <div
+              class="sideloaded-form__field sideloaded-form__field--icon-url"
+            >
+              <label>{{i18n "sideloaded_apps.form.icon_url"}}</label>
+              <div class="sideloaded-icon-url-row">
+                <div class="sideloaded-icon-url-row__input">
+                  <input
+                    type="url"
+                    value={{this._editIconUrl}}
+                    placeholder={{i18n "sideloaded_apps.form.icon_url"}}
+                    aria-label={{i18n "sideloaded_apps.form.icon_url"}}
+                    {{on "input" (fn this.updateEditField "_editIconUrl")}}
+                  />
+                  <span class="sideloaded-form__help">{{i18n
+                      "sideloaded_apps.form.icon_url_help"
+                    }}</span>
+                  {{#if (eq this._editIconValidationStatus "checking")}}
+                    <span class="sideloaded-link-status --checking">
+                      {{i18n "sideloaded_apps.icon_validation.checking"}}
+                    </span>
+                  {{else if (eq this._editIconValidationStatus "valid")}}
+                    <span class="sideloaded-link-status --valid">
+                      ✓
+                      {{this._editIconValidationMessage}}
+                    </span>
+                  {{else if (eq this._editIconValidationStatus "invalid")}}
+                    <span class="sideloaded-link-status --invalid">
+                      ✗
+                      {{this._editIconValidationMessage}}
+                    </span>
+                  {{/if}}
+                </div>
+                {{#if this._editIconPreviewUrl}}
+                  <div class="sideloaded-icon-preview">
+                    <img
+                      src={{this._editIconPreviewUrl}}
+                      alt={{i18n "sideloaded_apps.icon_validation.preview_alt"}}
+                      class="sideloaded-icon-preview__img"
+                    />
+                  </div>
+                {{/if}}
+              </div>
             </div>
 
             <div class="sideloaded-form__field">

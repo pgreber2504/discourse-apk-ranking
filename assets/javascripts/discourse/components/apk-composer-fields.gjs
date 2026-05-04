@@ -11,6 +11,7 @@ import { ajax } from "discourse/lib/ajax";
 import UppyUpload from "discourse/lib/uppy/uppy-upload";
 import { eq } from "discourse/truth-helpers";
 import { i18n } from "discourse-i18n";
+import { validateIconUrl } from "../lib/validate-icon-url";
 import ApkStarRating from "./apk-star-rating";
 
 let _pendingApkData = null;
@@ -393,51 +394,35 @@ export default class ApkComposerFields extends Component {
 
   _validateIcon() {
     const url = this.iconUrl.trim();
-
-    if (!url) {
-      this.iconValidationStatus = null;
-      this.iconValidationMessage = "";
-      this.iconPreviewUrl = null;
-      this._iconValidationToken++;
-      return;
-    }
-
-    if (!url.match(/^https?:\/\/.+/)) {
-      this.iconValidationStatus = "invalid";
-      this.iconValidationMessage = i18n(
-        "sideloaded_apps.icon_validation.invalid_url"
-      );
-      this.iconPreviewUrl = null;
-      this._iconValidationToken++;
-      return;
-    }
-
     const token = ++this._iconValidationToken;
+
     this.iconValidationStatus = "checking";
     this.iconValidationMessage = "";
 
-    const img = new Image();
-    img.onload = () => {
+    validateIconUrl(url).then((result) => {
       if (token !== this._iconValidationToken) {
         return;
       }
-      this.iconValidationStatus = "valid";
-      this.iconValidationMessage = i18n(
-        "sideloaded_apps.icon_validation.valid"
-      );
-      this.iconPreviewUrl = url;
-    };
-    img.onerror = () => {
-      if (token !== this._iconValidationToken) {
-        return;
+      if (result === "empty") {
+        this.iconValidationStatus = null;
+        this.iconValidationMessage = "";
+        this.iconPreviewUrl = null;
+      } else if (result === "valid") {
+        this.iconValidationStatus = "valid";
+        this.iconValidationMessage = i18n(
+          "sideloaded_apps.icon_validation.valid"
+        );
+        this.iconPreviewUrl = url;
+      } else {
+        this.iconValidationStatus = "invalid";
+        this.iconValidationMessage = i18n(
+          `sideloaded_apps.icon_validation.${
+            result === "invalid_url" ? "invalid_url" : "invalid"
+          }`
+        );
+        this.iconPreviewUrl = null;
       }
-      this.iconValidationStatus = "invalid";
-      this.iconValidationMessage = i18n(
-        "sideloaded_apps.icon_validation.invalid"
-      );
-      this.iconPreviewUrl = null;
-    };
-    img.src = url;
+    });
   }
 
   get model() {

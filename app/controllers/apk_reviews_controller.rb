@@ -80,7 +80,10 @@ class ::ApkReviewsController < ::ApplicationController
       "author_rating", "apk_checksum",
     )
 
+    icon_url_param = params.dig(:review, :icon_url)
+
     if review.update(review_params)
+      update_topic_icon_url(review.topic, icon_url_param)
       create_edit_audit_post(review, old_attrs)
       protect_screenshot_uploads(review)
 
@@ -562,5 +565,18 @@ class ::ApkReviewsController < ::ApplicationController
       :apk_checksum,
       screenshot_urls: [],
     )
+  end
+
+  # icon_url lives on the topic as a custom field, not on ApkReview, so it's
+  # handled separately from review_params. nil param = client didn't send the
+  # field (don't touch); empty string = explicit clear.
+  def update_topic_icon_url(topic, raw)
+    return if raw.nil? || topic.nil?
+
+    cleaned = raw.to_s.strip
+    return if topic.custom_fields["apk_icon_url"].to_s == cleaned
+
+    topic.custom_fields["apk_icon_url"] = cleaned
+    topic.save_custom_fields
   end
 end
